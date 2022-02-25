@@ -14,13 +14,13 @@
 #define LASERBEAM "materials/sprites/laserbeam.vmt" // текстура луча
 
 int iInvite[MAXPLAYERS+1], iLaser = -1, iDuels = 0, iMax = 3, iMoney = 2000, iHealth = 100, iPrepareTime = 5, iCount = 5;
-bool bReady[MAXPLAYERS+1], bDead = true, bNowDuel = false, bEditMode = false, bRoundEnd = false, bMapHasArena = false;
+bool bReady[MAXPLAYERS+1], bDead = true, bNowDuel = false, bEditMode = false, bRoundEnd = false, bMapHasArena = false,
+bDrawOnlyWhenDuel = false, bDotMode = false, bRespawn = true;
 float fDuelTime = 30.0, fInterval = DEFAULT_TIMER, fBase[2][3], fBounds[MAX_SIDES][2][3], fSpawns[2][3], fDots[2][3];
 char sMap[256], sPath[256];
 
 // Массив игроков на дуэли
 int iPlayers[2];
-#define FOR_PLAYER(%0) for (int %0 = MaxClients; %0 != 0; --%0) if (IsClientInGame(%0) && (%0 == iPlayers[0] || %0 == iPlayers[1]))
 
 Menu mmove, madd;
 Handle hTimerZone, hTimerDuel;
@@ -31,7 +31,7 @@ public Plugin myinfo =
 	name = "aDuels",
 	author = "XTANCE",
 	description = "Ещё один плагин на дуэльки",
-	version = "0.1",
+	version = "0.3",
 	url = "https://t.me/xtance"
 };
 
@@ -41,7 +41,7 @@ public void OnPluginStart()
 	
 	aArena = new ArrayList(); // энтити пропов для арены
 	aArena.Clear();
-	OnDuelEnd();
+	OnDuelEnd(0, 0);
 	
 	RegAdminCmd("sm_a_edit", Action_Edit, ADMFLAG_ROOT, "Редактировать арену");
 	RegAdminCmd("sm_a_spawn", Action_Spawn, ADMFLAG_ROOT, "Спавн");
@@ -92,11 +92,15 @@ public void OnPluginStart()
 	ConVar cvMoney = CreateConVar("a_money", "2000", "Деньги за выигрыш");
 	ConVar cvDead = CreateConVar("a_dead", "1", "Разрешать начинать дуэль мёртвым игрокам");
 	ConVar cvTime = CreateConVar("a_time", "30.0", "Время на дуэль");
+	ConVar cvDraw = CreateConVar("a_draw", "0", "Отрисовывать арену только во время дуэли");
+	ConVar cvRespawn = CreateConVar("a_respawn", "1", "Респавнить победителя");
 	
 	cvMax.AddChangeHook(HookMax);
 	cvMoney.AddChangeHook(HookMoney);
 	cvDead.AddChangeHook(HookDead);
 	cvTime.AddChangeHook(HookTime);
+	cvDraw.AddChangeHook(HookDraw);
+	cvRespawn.AddChangeHook(HookRespawn);
 	
 	HookMax(cvMax, "", "");
 	HookMoney(cvMoney, "", "");
@@ -130,6 +134,18 @@ public void HookTime(ConVar cv, const char[] sPrevious, const char[] sCurrent)
 	PrintToServer("[aD] Время на дуэль: %.2f", fDuelTime);
 }
 
+public void HookDraw(ConVar cv, const char[] sPrevious, const char[] sCurrent)
+{
+	bDrawOnlyWhenDuel = cv.BoolValue;
+	PrintToServer("[aD] Отрисовка только во время дуэли: %i", bDrawOnlyWhenDuel);
+}
+
+public void HookRespawn(ConVar cv, const char[] sPrevious, const char[] sCurrent)
+{
+	bRespawn = cv.BoolValue;
+	PrintToServer("[aD] Респавнить победителя: %i", bRespawn);
+}
+
 public Action DisableVIP(int iClient, const char[] sCmd, int iArgc)
 {
 	if (bNowDuel && IsOnDuel(iClient)) RequestFrame(BlockVIP, iClient);
@@ -145,9 +161,11 @@ void BlockVIP(int i)
 	delete panel;
 }
 
-public int PanelHandler1(Menu menu, MenuAction action, int param1, int param2){}
+public int PanelHandler1(Menu menu, MenuAction action, int param1, int param2)
+{}
 
-bool Filter(int iEnt, int iMask, any iClient){
+bool Filter(int iEnt, int iMask, any iClient)
+{
 	return iClient != iEnt;
 }
 
@@ -163,58 +181,85 @@ float GetEyePosition(int iClient)
 	return fEyePos;
 }
 
-void MainMenu(int iClient){
-	
+float GetPosition(int iClient)
+{
+	float fPos[3];
+	GetEntPropVector(iClient, Prop_Send, "m_vecOrigin", fPos);
+	return fPos;
+}
+
+void MainMenu(int iClient)
+{
 	bEditMode = true;
+	char sItem[256];
 	
 	Menu medit = new Menu(hEdit);
-	medit.SetTitle("Редактор арены");
+	medit.SetTitle("[aD] Редактор арены");
 	
 	medit.AddItem("pos", "Позиция");
-	medit.AddItem("add", "Изменение размеров\n");
+	medit.AddItem("add", "Размер\n");
 	
-	char sItem[256];
-	FormatEx(sItem, sizeof(sItem), "Выбрать точку 1 (%.0f %.0f %.0f)", fDots[0][0], fDots[0][1], fDots[0][2]); 
+	FormatEx(sItem, sizeof(sItem), "Выбрать точку 1 [%.0f %.0f %.0f]", fDots[0][0], fDots[0][1], fDots[0][2]); 
 	medit.AddItem("dot1", sItem);
-	FormatEx(sItem, sizeof(sItem), "Выбрать точку 2 (%.0f %.0f %.0f)", fDots[1][0], fDots[1][1], fDots[1][2]); 
+	
+	FormatEx(sItem, sizeof(sItem), "Выбрать точку 2 [%.0f %.0f %.0f]", fDots[1][0], fDots[1][1], fDots[1][2]); 
 	medit.AddItem("dot2", sItem);
+	
+	FormatEx(sItem, sizeof(sItem), "Режим выбора точек [%s]", bDotMode ? "позиция" : "прицел");
+	medit.AddItem("mode", sItem);
+	
 	medit.AddItem("dot_new", "Создать арену между точек");
 	medit.AddItem("del", "Удалить арену с карты");
+	
 	
 	medit.Display(iClient, 0);
 }
 
-char sTempArg1[16], sTempArg2[16];
-
-// Пример, как использовать команды sm_a_start и sm_a_end
+// Пример, как можно обработать начало дуэли в другом плагине, зарегистрировав sm_a_start
 public Action Action_OnDuelStart(int iArgs)
 {
-	if (iArgs != 2) return Plugin_Handled;
-	
-	GetCmdArg(1, sTempArg1, sizeof(sTempArg1));
-	GetCmdArg(2, sTempArg2, sizeof(sTempArg2));
-	
-	PrintToServer("[aD] Началась дуэль между %s и %s (UserID)", sTempArg1, sTempArg2);
+	/*
+		if (iArgs != 2) return Plugin_Handled;
+		char sTempArg1[16], sTempArg2[16];
+		
+		GetCmdArg(1, sTempArg1, sizeof(sTempArg1));
+		GetCmdArg(2, sTempArg2, sizeof(sTempArg2));
+		PrintToServer("[aD] Началась дуэль между %s и %s (UserID)", sTempArg1, sTempArg2);
+	*/
 	return Plugin_Handled;
 }
 
+// Пример, как можно обработать конец дуэли в другом плагине, зарегистрировав sm_a_end
 public Action Action_OnDuelEnd(int iArgs)
 {
-	if (iArgs != 2) return Plugin_Handled;
-	
-	GetCmdArg(1, sTempArg1, sizeof(sTempArg1));
-	GetCmdArg(2, sTempArg2, sizeof(sTempArg2));
-	
-	PrintToServer("[aD] Завершена дуэль между %s и %s (UserID)", sTempArg1, sTempArg2);
+	/*
+		if (iArgs != 2) return Plugin_Handled;
+		char sTempArg1[16], sTempArg2[16];
+		
+		GetCmdArg(1, sTempArg1, sizeof(sTempArg1)); // это проигравший
+		GetCmdArg(2, sTempArg2, sizeof(sTempArg2)); // это победитель
+		
+		int iLoser = GetClientOfUserId(StringToInt(sTempArg1));
+		int iWinner = GetClientOfUserId(StringToInt(sTempArg1));
+		
+		// не забудьте проверить на валидность:
+		if (iWinner && IsClientInGame(iWinner))
+		{
+			PrintToServer("[aD] %N выиграл дуэль", iWinner);
+			// тут можно выдать игроку кредиты или ещё что-нибудь
+		}
+	*/
 	return Plugin_Handled;
 }
 
-public Action Action_Edit(int iClient, int iArgs){
+public Action Action_Edit(int iClient, int iArgs)
+{
 	MainMenu(iClient);
 	return Plugin_Handled;
 }
 
-void FindBounds2(float min[3], float max[3]){
+void FindBounds2(float min[3], float max[3])
+{
 	
 	if (min[2] > max[2])
 	{
@@ -290,14 +335,20 @@ public int hEdit(Menu menu, MenuAction action, int param1, int param2)
 			}
 			else if (StrEqual(sItem, "dot1", false))
 			{
-				fDots[0] = GetEyePosition(iClient);
+				fDots[0] = bDotMode ? GetPosition(iClient) : GetEyePosition(iClient);
 				MainMenu(iClient);
 			}
 			else if (StrEqual(sItem, "dot2", false))
 			{
-				fDots[1] = GetEyePosition(iClient);
+				fDots[1] = bDotMode ? GetPosition(iClient) : GetEyePosition(iClient);
 				MainMenu(iClient);
-			} 
+			}
+			else if (StrEqual(sItem, "mode", false))
+			{
+				bDotMode = !bDotMode;
+				PrintToChat(iClient, " >> Теперь вектор точки будет выбран по %s.", bDotMode ? "вашей позиции" : "вашему прицелу");
+				MainMenu(iClient);
+			}
 			else if (StrEqual(sItem, "dot_new", false))
 			{
 				if (fDots[0][0] != 0.0 && fDots[0][1] != 0.0 && fDots[1][1] != 0.0 && fDots[1][1] != 0.0)
@@ -366,57 +417,37 @@ public int hMove(Menu menu, MenuAction action, int iClient, int param2)
 			int iXYZ, iEnt;
 			float fAdd;
 			
-			if (StrEqual(item, "x+"))
+			switch(item[1])
 			{
-				iXYZ = 0;
-				fAdd = ADD_UNITS;
+				case '+':	fAdd = ADD_UNITS;
+				case '-':	fAdd = -ADD_UNITS;
 			}
-			else if (StrEqual(item, "x-"))
+
+			switch(item[0])
 			{
-				iXYZ = 0;
-				fAdd = -ADD_UNITS;
+				case 'x':	iXYZ = 0;
+				case 'y':	iXYZ = 1;
+				case 'z':	iXYZ = 2;
+				case 'o':
+				{
+					fAdd = 0.0;
+					Save();
+					PrintToChat(iClient, " \x04>>\x01 Изменения сохранены!");
+				}
 			}
-			else if (StrEqual(item, "y+"))
+
+			if(fAdd != 0.0)
 			{
-				iXYZ = 1;
-				fAdd = ADD_UNITS;
-			}
-			else if (StrEqual(item, "y-"))
-			{
-				iXYZ = 1;
-				fAdd = -ADD_UNITS;
-			}
-			else if (StrEqual(item, "z+"))
-			{
-				iXYZ = 2;
-				fAdd = ADD_UNITS;
-			}
-			else if (StrEqual(item, "z-"))
-			{
-				iXYZ = 2;
-				fAdd = -ADD_UNITS;
-			}
-			else if (StrEqual(item, "ok"))
-			{
-				fAdd = 0.0;
-				Save();
-				PrintToChat(iClient, " \x04>>\x01 Изменения сохранены!");
-			}
-			
-			mmove.Display(iClient, 0);
-			
-			if (fAdd != 0.0){
-				
 				fBase[0][iXYZ]+=fAdd;
 				fBase[1][iXYZ]+=fAdd;
 				CheckCoordinates();
-				
+
 				// Двигаем существующие энтити
 				float fPos[3];
-				for (int i = 0; i < aArena.Length; i++)
+				for(int i = 0; i < aArena.Length; i++)
 				{
 					iEnt = aArena.Get(i);
-					if (IsValidEntity(iEnt))
+					if(IsValidEntity(iEnt))
 					{
 						GetEntPropVector(iEnt, Prop_Send, "m_vecOrigin", fPos);
 						fPos[iXYZ] += fAdd;
@@ -424,6 +455,8 @@ public int hMove(Menu menu, MenuAction action, int iClient, int param2)
 					}
 				}
 			}
+			
+			mmove.Display(iClient, 0);
 		}
 		case MenuAction_Cancel:
 		{
@@ -441,45 +474,25 @@ public int hAdd(Menu menu, MenuAction action, int iClient, int param2){
 			menu.GetItem(param2, item, sizeof(item));
 			int iXYZ;
 			float fAdd;
-			if (StrEqual(item, "x+"))
-			{
-				iXYZ = 0;
-				fAdd = ADD_UNITS;
-			}
-			if (StrEqual(item, "x-"))
-			{
-				iXYZ = 0;
-				fAdd = -ADD_UNITS;
-			}
-			if (StrEqual(item, "y+"))
-			{
-				iXYZ = 1;
-				fAdd = ADD_UNITS;
-			}
-			if (StrEqual(item, "y-"))
-			{
-				iXYZ = 1;
-				fAdd = -ADD_UNITS;
-			}
-			if (StrEqual(item, "z+"))
-			{
-				iXYZ = 2;
-				fAdd = ADD_UNITS;
-			}
-			if (StrEqual(item, "z-"))
-			{
-				iXYZ = 2;
-				fAdd = -ADD_UNITS;
-			}
 			
-			if (StrEqual(item, "ok"))
+			switch(item[1])
 			{
-				PrintToChat(iClient, " \x04>>\x01 Изменения сохранены!");
-				fAdd = 0.0;
-				Save();
+				case '+':	fAdd = ADD_UNITS;
+				case '-':	fAdd = -ADD_UNITS;
 			}
-			
-			madd.Display(iClient, 0);
+
+			switch(item[0])
+			{
+				case 'x':	iXYZ = 0;
+				case 'y':	iXYZ = 1;
+				case 'z':	iXYZ = 2;
+				case 'o':
+				{
+					fAdd = 0.0;
+					Save();
+					PrintToChat(iClient, " \x04>>\x01 Изменения сохранены!");
+				}
+			}
 			
 			if (fAdd != 0.0)
 			{
@@ -488,6 +501,9 @@ public int hAdd(Menu menu, MenuAction action, int iClient, int param2){
 				else fBase[1][iXYZ] += fAdd;
 				if (CheckCoordinates()) CreateEntities();
 			}
+			
+			madd.Display(iClient, 0);
+			
 		}
 		case MenuAction_Cancel:
 		{
@@ -542,19 +558,21 @@ public Action Action_Spawn(int iClient, int iArgs){
 	char sSpawn[8];
 	GetCmdArgString(sSpawn, sizeof(sSpawn));
 	
-	if (StrEqual(sSpawn, "0", false))
+	int pos = -1;
+	if (!sSpawn[1]) switch(sSpawn[0])
 	{
-		TeleportEntity(iClient, fSpawns[0], NULL_VECTOR, NULL_VECTOR);
-		ReplyToCommand(iClient, " >> Телепорт на спавн 0");
+		case '0':	pos = 0;
+		case '1':	pos = 1;
 	}
-	else if (StrEqual(sSpawn, "1", false))
+
+	if(pos == -1)
 	{
-		TeleportEntity(iClient, fSpawns[1], NULL_VECTOR, NULL_VECTOR);
-		ReplyToCommand(iClient, " >> Телепорт на спавн 1");
+		ReplyToCommand(iClient, " >> Использование: !asp 0/1");
 	}
 	else
 	{
-		ReplyToCommand(iClient, " >> Использование: !asp 0/1");
+		TeleportEntity(iClient, fSpawns[pos], NULL_VECTOR, NULL_VECTOR);
+		ReplyToCommand(iClient, " >> Телепорт на спавн %i", pos);
 	}
 	return Plugin_Handled;
 }
@@ -602,11 +620,7 @@ public void OnMapStart(){
 // Устанавливает таймер, отрисовывающий границы арены
 void SetZoneTimer(float fInt)
 {
-	if(hTimerZone != INVALID_HANDLE)
-	{
-		KillTimer(hTimerZone);
-		hTimerZone = INVALID_HANDLE;
-	}
+	if(hTimerZone) delete hTimerZone;
 	
 	if (fInt != 0.0)
 	{
@@ -623,6 +637,9 @@ public Action Timer_Zone(Handle timer)
 
 void CreateBoxes()
 {
+	// Если режим отрисовки только на дуэли, и сейчас нет дуэли или редактирования, отменить отрисовку
+	if (bDrawOnlyWhenDuel && !bNowDuel && !bEditMode) return;
+	
 	for (int i = 0; i < MAX_SIDES; i++)
 	{
 		CreateBox(fBounds[i][0], fBounds[i][1]);
@@ -633,7 +650,7 @@ public Action RoundStart(Event event, const char[] name, bool dontBroadcast){
 	bRoundEnd = false;
 	aArena.Clear();
 	iCount = iDuels = 0;
-	OnDuelEnd();
+	OnDuelEnd(0, 0);
 	if (bMapHasArena) CreateEntities();
 }
 
@@ -763,6 +780,11 @@ bool CheckLiterallyEverything(int iClient, int iTarget){
 		PrintToChat(iClient, " \x07>>\x01 Дуэли можно играть за T или CT.");
 		return false;
 	}
+	else if (GetClientTeam(iTarget) <= 1)
+	{
+		PrintToChat(iClient, " \x07>>\x01 Нельзя играть дуэль с наблюдателем.");
+		return false;
+	}
 	else if ((!IsDeadClient(iClient, iClient)) || !IsDeadClient(iTarget, iClient))
 	{
 		return false;
@@ -829,28 +851,32 @@ void StartDuel(int iClient, int iTarget)
 	CreateTimer(1.0, Timer_GetReady, _, TIMER_REPEAT);
 	
 	// Подготовка к дуэли
-	FOR_PLAYER(i)
+	for (int i = 0; i < 2; i++)
 	{
+		int iPlayer = iPlayers[i];
+		if (!IsValidClient(iPlayer)) continue;
+		
 		// Дроп пушек и бомбы
 		int c4;
-		while ((c4 = GetPlayerWeaponSlot(i, CS_SLOT_C4)) != -1)
+		while ((c4 = GetPlayerWeaponSlot(iPlayer, CS_SLOT_C4)) != -1)
 		{
 			//Фикс от DarklSide. См. https://hlmod.ru/threads/ispravlenie-oshibki.31038/
-			if (GetEntPropEnt(c4, Prop_Send, "m_hOwnerEntity") != i) SetEntPropEnt(c4, Prop_Send, "m_hOwnerEntity", i);
-			CS_DropWeapon(i, c4, true, false);
+			if (GetEntPropEnt(c4, Prop_Send, "m_hOwnerEntity") != iPlayer) SetEntPropEnt(c4, Prop_Send, "m_hOwnerEntity", iPlayer);
+			CS_DropWeapon(iPlayer, c4, true, false);
 		}
 		
 		// Респавн, настройка оружия и здоровья
-		CS_RespawnPlayer(i);
-		TeleportEntity(i, fSpawns[ GetDuelID(i) ], NULL_VECTOR, NULL_VECTOR);
-		SetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue", 0.0);
-		SetEntityHealth(i, 1337);
-		iInvite[i] = -1;
-		FakeClientCommand(i, "use weapon_knife");
+		CS_RespawnPlayer(iPlayer);
+		TeleportEntity(iPlayer, fSpawns[ GetDuelID(iPlayer) ], NULL_VECTOR, NULL_VECTOR);
+		SetEntPropFloat(iPlayer, Prop_Send, "m_flLaggedMovementValue", 0.0);
+		SetEntityHealth(iPlayer, 1337);
+		iInvite[iPlayer] = -1;
+		FakeClientCommand(iPlayer, "use weapon_knife");
 	}
 	
 	bNowDuel = true;
 	ServerCommand("sm_a_start %i %i", GetClientUserId(iClient), GetClientUserId(iTarget));
+	if (bDrawOnlyWhenDuel) CreateBoxes();
 }
 
 // Возвращает 0 или 1 (обычно 0 это тот кто пригласил, а 1 кого пригласили)
@@ -873,14 +899,17 @@ public Action Timer_GetReady(Handle timer){
 	// Таймер подготовки истёк
 	if (iCount <= 0)
 	{
-		FOR_PLAYER(i)
+		for (int i = 0; i < 2; i++)
 		{
-			SetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue", 1.0);
-			PrintHintText(i,">> Дуэль началась!!");
-			SetEntityHealth(i, iHealth);
+			int iPlayer = iPlayers[i];
+			if (!IsValidClient(iPlayer)) continue;
+			
+			SetEntPropFloat(iPlayer, Prop_Send, "m_flLaggedMovementValue", 1.0);
+			PrintHintText(iPlayer,">> Дуэль началась!!");
+			SetEntityHealth(iPlayer, iHealth);
 		}
 		iCount = iPrepareTime;
-		if (hTimerDuel != INVALID_HANDLE) KillTimer(hTimerDuel);
+		if (hTimerDuel) delete hTimerDuel;
 		hTimerDuel = CreateTimer(fDuelTime, Timer_Duel);
 		return Plugin_Stop;
 	}
@@ -888,12 +917,15 @@ public Action Timer_GetReady(Handle timer){
 	char sReady[128];
 	FormatEx(sReady, sizeof(sReady), ">> Дуэль начнётся через %i секунд!", iCount);
 	
-	FOR_PLAYER(i)
+	for (int i = 0; i < 2; i++)
 	{
-		SetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue", 0.0);
-		PrintHintText(i,sReady);
-		SetEntityHealth(i, 1337);
-		ClientCommand(i, "play buttons/button17.wav");
+		int iPlayer = iPlayers[i];
+		if (!IsValidClient(iPlayer)) continue;
+		
+		SetEntPropFloat(iPlayer, Prop_Send, "m_flLaggedMovementValue", 0.0);
+		PrintHintText(iPlayer, sReady);
+		SetEntityHealth(iPlayer, 1337);
+		ClientCommand(iPlayer, "play buttons/button17.wav");
 	}
 	
 	iCount--;
@@ -907,11 +939,14 @@ bool IsOnDuel(int iClient)
 
 public Action Timer_Duel(Handle timer)
 {
-	hTimerDuel = INVALID_HANDLE;
-	FOR_PLAYER(i)
+	hTimerDuel = null;
+	for (int i = 0; i < 2; i++)
 	{
-		if (IsPlayerAlive(i)) ForcePlayerSuicide(i);
-		PrintToChatAll(" \x03>>\x01 Игрок \x03%N\x01 был убит за задержку дуэли!",i);
+		int iPlayer = iPlayers[i];
+		if (!IsValidClient(iPlayer)) continue;
+		
+		if (IsPlayerAlive(iPlayer)) ForcePlayerSuicide(iPlayer);
+		PrintToChatAll(" \x03>>\x01 Игрок \x03%N\x01 был убит за задержку дуэли!", iPlayer);
 	}
 }
 
@@ -925,25 +960,21 @@ public Action HookPlayerDeath(Handle event, const char[] sName, bool dontBroadca
 		int iEnemy = iPlayers[0];
 		if (iEnemy == iClient) iEnemy = iPlayers[1];
 		RequestFrame(OnPlayerWon, iEnemy);
-		OnDuelEnd();
+		OnDuelEnd(iClient, iEnemy);
 	}
 	return Plugin_Continue;
 }
 
 // Конец дуэли
-void OnDuelEnd()
+void OnDuelEnd(int iLoser, int iWinner)
 {
 	// Если дуэль была, пошлём информацию об её конце (можно перехватить другим плагином)
-	if (bNowDuel) ServerCommand("sm_a_end %i %i", GetClientUserId(iPlayers[0]), GetClientUserId(iPlayers[1]));
+	if (bNowDuel) ServerCommand("sm_a_end %i %i", GetClientUserId(iLoser), GetClientUserId(iWinner));
 	
 	iPlayers[0] = iPlayers[1] = 0;
 	bNowDuel = false;
 	
-	if(hTimerDuel != INVALID_HANDLE)
-	{
-		KillTimer(hTimerDuel);
-		hTimerDuel = INVALID_HANDLE;
-	}
+	if (hTimerDuel) delete hTimerDuel;
 }
 
 public Action HookPlayerSpawn(Handle event, const char[] sName, bool dontBroadcast)
@@ -965,7 +996,17 @@ public void OnPlayerWon(int i)
 {
 	if (!IsValidClient(i)) return;
 	
-	CS_RespawnPlayer(i);
+	if (bRespawn)
+	{
+		CS_RespawnPlayer(i);
+	}
+	else
+	{
+		int iTeam = GetClientTeam(i); // изначальная команда
+		ChangeClientTeam(i, 1); // переносим в спекты
+		ChangeClientTeam(i, iTeam); // и обратно
+	}
+	
 	SetEntPropFloat(i, Prop_Send, "m_flLaggedMovementValue", 1.0);
 	PrintToChatAll(" \x09>>\x01 %N выиграл дуэль.", i);
 	
@@ -1039,8 +1080,11 @@ void CreateBox(float bottom[3], float upper[3])
 	int j;
 	for (int i = 0; i < 4; i++)
 	{
-		for (int x=0; x < 3; x++) corners[i][x] = bottom[x];
-		for (int x=0; x < 3; x++) corners[i+4][x] = upper[x];
+		for (int x = 0; x < 3; x++) 
+		{
+			corners[i][x] = bottom[x];
+			corners[i+4][x] = upper[x];
+		}
 	}
 
 	corners[1][0] = upper[0];
@@ -1052,9 +1096,10 @@ void CreateBox(float bottom[3], float upper[3])
 	corners[5][1] = bottom[1];
 	corners[7][0] = bottom[0];
 	
-	//bottom
+	
 	for (int i = 0; i < 4; i++)
 	{
+		// пол
 		j = ( i == 3 ? 0 : i+1 );
 		TE_SetupBeamPoints(corners[i], corners[j], iLaser, 	0,		//haloindex
 															0,		//startframe
@@ -1067,20 +1112,17 @@ void CreateBox(float bottom[3], float upper[3])
 															iColor,	//color
 															1);		//speed
 		TE_SendToAll();
+		
+		// стенки
+		TE_SetupBeamPoints(corners[i], corners[i+4], iLaser, 0,0,0,fInterval,0.5,0.5,0,0.0,iColor,1);
+		TE_SendToAll();
 	}
 	
-	//top
+	// потолок
 	for (int i = 4; i < 8; i++)
 	{
 		j = ( i == 7 ? 4 : i+1 );
 		TE_SetupBeamPoints(corners[i], corners[j], iLaser, 0,0,0,fInterval,0.5,0.5,0,0.0,iColor,1);
-		TE_SendToAll();
-	}
-	
-	//vertical
-	for (int i = 0; i < 4; i++)
-	{
-		TE_SetupBeamPoints(corners[i], corners[i+4], iLaser, 0,0,0,fInterval,0.5,0.5,0,0.0,iColor,1);
 		TE_SendToAll();
 	}
 }
